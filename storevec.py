@@ -1,7 +1,8 @@
 from pinecone_db import PineconeDB
 
 # Initialize
-# db = PineconeDB(index_name="langtech")
+db = PineconeDB(index_name="langtech")
+
 
 # Set a default namespace
 # db.set_namespace("laptops")
