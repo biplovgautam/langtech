@@ -21,14 +21,20 @@ class PineconeDB:
         # Check for API keys
         self.pinecone_api_key = os.environ.get("PINECONE_API_KEY")
         self.hf_api_key = os.environ.get("HF_API_KEY")
+        # Use a model whose default task is feature-extraction to avoid sentence-similarity routing
+        self.hf_model = os.environ.get("HF_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
         if not self.pinecone_api_key:
             raise ValueError("PINECONE_API_KEY not found in environment variables")
         if not self.hf_api_key:
             raise ValueError("HF_API_KEY not found in environment variables")
 
-        # Hugging Face API endpoint for embeddings
-        self.hf_api_url = "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2"
+        # Hugging Face API endpoint for embeddings. Using the standard models endpoint
+        # with feature-extraction-compatible parameters.
+        self.hf_api_url = (
+            "https://api-inference.huggingface.co/models/" + self.hf_model
+        )
         self.hf_headers = {"Authorization": f"Bearer {self.hf_api_key}"}
+        print(f"Using HF embedding model: {self.hf_model}")
 
         # Initialize Pinecone client
         try:
@@ -79,13 +85,45 @@ class PineconeDB:
             Exception: If the API request fails
         """
         try:
-            response = requests.post(self.hf_api_url, headers=self.hf_headers, json={"inputs": text})
-            response.raise_for_status()
-            embedding = response.json()
-            if isinstance(embedding, list) and len(embedding) > 0:
-                return embedding[0]  # all-MiniLM-L6-v2 returns list of lists
-            else:
-                raise ValueError("Unexpected embedding format from Hugging Face API")
+            payload = {
+                "inputs": text,
+                # Ensure model loads on demand and long texts are truncated instead of erroring
+                "options": {"wait_for_model": True},
+                "parameters": {"truncate": True},
+            }
+            response = requests.post(self.hf_api_url, headers=self.hf_headers, json=payload, timeout=60)
+            try:
+                response.raise_for_status()
+            except requests.HTTPError as http_err:
+                # Include server message to make 4xx/5xx actionable
+                detail = None
+                try:
+                    detail = response.json()
+                except Exception:
+                    detail = response.text
+                raise Exception(f"HTTP {response.status_code} from HF: {detail}") from http_err
+
+            data = response.json()
+
+            # Normalize output into a 1D vector
+            # Possible shapes:
+            #  - [384]
+            #  - [[384]] (batched with size 1)
+            #  - [seq_len, hidden] (token features) – not expected for sentence-transformers, but handle defensively by pooling
+            if isinstance(data, list) and all(isinstance(x, (int, float)) for x in data):
+                return data  # shape: [384]
+            if isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
+                # If it's [[...]] take the first row
+                first = data[0]
+                if all(isinstance(x, (int, float)) for x in first):
+                    return first
+                # If token-level features [seq_len, hidden], mean-pool across tokens
+                if all(isinstance(row, list) and all(isinstance(v, (int, float)) for v in row) for row in data):
+                    # mean over tokens
+                    hidden_size = len(data[0])
+                    pooled = [sum(row[i] for row in data) / len(data) for i in range(hidden_size)]
+                    return pooled
+            raise ValueError(f"Unexpected embedding format from HF: {str(data)[:200]}")
         except Exception as e:
             raise Exception(f"Failed to get embedding: {e}")
 
