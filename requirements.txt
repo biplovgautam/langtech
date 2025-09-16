@@ -1,3 +1,9 @@
 requests 
 python-dotenv 
 langchain
+beautifulsoup4
+lxml
+tqdm
+beautifulsoup4
+lxml
+tqdm
